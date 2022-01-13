@@ -36,7 +36,7 @@ type deserializer struct {
 }
 
 func (d *deserializer) Deserialize(key string, val []byte) (value interface{}, err error) {
-	if d.keyOptions == nil {
+	if len(d.keyOptions) < 1 {
 		return val, err
 	}
 

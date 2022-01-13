@@ -9,8 +9,8 @@ import (
 	"go.etcd.io/etcd/client/v3"
 )
 
-// Kv etcd Kv
-type Kv interface {
+// Config etcd Config
+type Config interface {
 	// LoadKey 加载前缀到缓存
 	LoadKey(prefix string, opts ...clientv3.OpOption) (err error)
 	// Watch 监视某个Key，返回WatchChan
@@ -29,24 +29,36 @@ type Kv interface {
 	GetRemoteContext(ctx context.Context, key string) (kvs []*mvccpb.KeyValue, err error)
 	// Delete 删除某个Key数据
 	Delete(key string, timeout time.Duration, opts ...clientv3.OpOption) (resp *clientv3.DeleteResponse, err error)
-	// Connection 获取ectd keyValue
+	// Connection 获取ectd config
 	Connection() (client *clientv3.Client)
 	// Close ---
 	Close() (err error)
 }
 
-func NewKv(v3Conf *clientv3.Config, prefixList []string, keyOptions map[string]KeyOption, watchOptions ...clientv3.OpOption) (c Kv, err error) {
-	var conn *clientv3.Client
-	conn, err = clientv3.New(*v3Conf)
+func NewConfig(v3Conf *clientv3.Config, prefixList []string, keyOptions []KeyOption, watchOptions ...clientv3.OpOption) (c Config, err error) {
+	var client *clientv3.Client
+	client, err = clientv3.New(*v3Conf)
 
 	if err != nil {
 		return nil, err
 	}
 
-	c = &keyValue{
-		client:  conn,
+	return NewConfigWithClient(client, prefixList, keyOptions, watchOptions...)
+}
+
+func NewConfigWithClient(client *clientv3.Client, prefixList []string, keyOptions []KeyOption, watchOptions ...clientv3.OpOption) (c Config, err error) {
+	var kom map[string]KeyOption
+	if len(keyOptions) > 0 {
+		kom = make(map[string]KeyOption, len(keyOptions))
+		for _, option := range keyOptions {
+			kom[option.Key] = option
+		}
+	}
+
+	c = &config{
+		client:  client,
 		cache:   base.NewShardMap(),
-		decoder: NewDeserializer(keyOptions),
+		decoder: NewDeserializer(kom),
 	}
 
 	if len(prefixList) > 0 {
@@ -66,22 +78,22 @@ func NewKv(v3Conf *clientv3.Config, prefixList []string, keyOptions map[string]K
 	return c, err
 }
 
-type keyValue struct {
+type config struct {
 	client  *clientv3.Client
 	cache   base.ShardMap
 	decoder Deserializer
 }
 
-func (kv *keyValue) LoadKey(prefix string, opts ...clientv3.OpOption) (err error) {
-	resp, err := kv.client.Get(context.Background(), prefix, opts...)
+func (c *config) LoadKey(prefix string, opts ...clientv3.OpOption) (err error) {
+	resp, err := c.client.Get(context.Background(), prefix, opts...)
 	if err != nil {
 		return err
 	}
 
 	for _, ev := range resp.Kvs {
 		key := base.Bytes2String(ev.Key)
-		if value, er := kv.decoder.Deserialize(key, ev.Value); er == nil {
-			kv.cache.Set(key, value)
+		if value, er := c.decoder.Deserialize(key, ev.Value); er == nil {
+			c.cache.Set(key, value)
 		} else {
 			//解析出现错误，记录并返回错误，不影响其他配置加载
 			err = er
@@ -91,73 +103,73 @@ func (kv *keyValue) LoadKey(prefix string, opts ...clientv3.OpOption) (err error
 	return err
 }
 
-func (kv *keyValue) Watch(ctx context.Context, key string, opts ...clientv3.OpOption) (wch clientv3.WatchChan) {
-	return kv.client.Watch(ctx, key, opts...)
+func (c *config) Watch(ctx context.Context, key string, opts ...clientv3.OpOption) (wch clientv3.WatchChan) {
+	return c.client.Watch(ctx, key, opts...)
 }
 
-func (kv *keyValue) WatchKey4Cache(key string, opts ...clientv3.OpOption) {
-	watchChan := kv.Watch(context.Background(), key, opts...)
+func (c *config) WatchKey4Cache(key string, opts ...clientv3.OpOption) {
+	watchChan := c.Watch(context.Background(), key, opts...)
 	go func() {
 		for watchResponse := range watchChan {
 			for _, ev := range watchResponse.Events {
 				switch ev.Type {
 				case mvccpb.PUT:
 					k := string(ev.Kv.Key)
-					if value, err := kv.decoder.Deserialize(k, ev.Kv.Value); err == nil {
-						kv.cache.Set(k, value)
+					if value, err := c.decoder.Deserialize(k, ev.Kv.Value); err == nil {
+						c.cache.Set(k, value)
 					}
 				case mvccpb.DELETE:
-					kv.cache.Delete(ev.Kv)
+					c.cache.Delete(ev.Kv)
 				}
 			}
 		}
 	}()
 }
 
-func (kv *keyValue) Get(key string) (value interface{}, exists bool) {
-	return kv.cache.Get(key)
+func (c *config) Get(key string) (value interface{}, exists bool) {
+	return c.cache.Get(key)
 }
 
-func (kv *keyValue) GetRemote(key string, timeout time.Duration) (kvs []*mvccpb.KeyValue, err error) {
+func (c *config) GetRemote(key string, timeout time.Duration) (kvs []*mvccpb.KeyValue, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var resp *clientv3.GetResponse
-	resp, err = kv.client.Get(ctx, key)
+	resp, err = c.client.Get(ctx, key)
 	if err != nil {
 		return
 	}
 	return resp.Kvs, nil
 }
 
-func (kv *keyValue) GetRemoteContext(ctx context.Context, key string) (kvs []*mvccpb.KeyValue, err error) {
+func (c *config) GetRemoteContext(ctx context.Context, key string) (kvs []*mvccpb.KeyValue, err error) {
 	var resp *clientv3.GetResponse
-	resp, err = kv.client.Get(ctx, key)
+	resp, err = c.client.Get(ctx, key)
 	if err != nil {
 		return
 	}
 	return resp.Kvs, nil
 }
 
-func (kv *keyValue) Put(key string, value string, timeout time.Duration, opts ...clientv3.OpOption) (resp *clientv3.PutResponse, err error) {
+func (c *config) Put(key string, value string, timeout time.Duration, opts ...clientv3.OpOption) (resp *clientv3.PutResponse, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return kv.client.Put(ctx, key, value, opts...)
+	return c.client.Put(ctx, key, value, opts...)
 }
 
-func (kv *keyValue) PutContext(ctx context.Context, key string, value string, opts ...clientv3.OpOption) (resp *clientv3.PutResponse, err error) {
-	return kv.client.Put(ctx, key, value, opts...)
+func (c *config) PutContext(ctx context.Context, key string, value string, opts ...clientv3.OpOption) (resp *clientv3.PutResponse, err error) {
+	return c.client.Put(ctx, key, value, opts...)
 }
 
-func (kv *keyValue) Delete(key string, timeout time.Duration, opts ...clientv3.OpOption) (resp *clientv3.DeleteResponse, err error) {
+func (c *config) Delete(key string, timeout time.Duration, opts ...clientv3.OpOption) (resp *clientv3.DeleteResponse, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return kv.client.Delete(ctx, key, opts...)
+	return c.client.Delete(ctx, key, opts...)
 }
 
-func (kv *keyValue) Connection() (client *clientv3.Client) {
-	return kv.client
+func (c *config) Connection() (client *clientv3.Client) {
+	return c.client
 }
 
-func (kv *keyValue) Close() (err error) {
-	return kv.client.Close()
+func (c *config) Close() (err error) {
+	return c.client.Close()
 }

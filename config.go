@@ -2,6 +2,7 @@ package betcd
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/grpc-boot/base"
@@ -56,9 +57,10 @@ func NewConfigWithClient(client *clientv3.Client, prefixList []string, keyOption
 	}
 
 	c = &config{
-		client:  client,
-		cache:   base.NewShardMap(),
-		decoder: NewDeserializer(kom),
+		client:    client,
+		cache:     base.NewShardMap(),
+		decoder:   NewDeserializer(kom),
+		cacheChan: make(map[string]chan struct{}, len(prefixList)),
 	}
 
 	if len(prefixList) > 0 {
@@ -79,13 +81,16 @@ func NewConfigWithClient(client *clientv3.Client, prefixList []string, keyOption
 }
 
 type config struct {
-	client  *clientv3.Client
-	cache   base.ShardMap
-	decoder Deserializer
+	client    *clientv3.Client
+	cache     base.ShardMap
+	decoder   Deserializer
+	mutex     sync.RWMutex
+	hasClose  bool
+	cacheChan map[string]chan struct{}
 }
 
 func (c *config) LoadKey(prefix string, opts ...clientv3.OpOption) (err error) {
-	resp, err := c.client.Get(context.Background(), prefix, opts...)
+	resp, err := c.client.Get(context.TODO(), prefix, opts...)
 	if err != nil {
 		return err
 	}
@@ -108,22 +113,41 @@ func (c *config) Watch(ctx context.Context, key string, opts ...clientv3.OpOptio
 }
 
 func (c *config) WatchKey4Cache(key string, opts ...clientv3.OpOption) {
-	watchChan := c.Watch(context.Background(), key, opts...)
-	go func() {
-		for watchResponse := range watchChan {
-			for _, ev := range watchResponse.Events {
-				switch ev.Type {
-				case mvccpb.PUT:
-					k := string(ev.Kv.Key)
-					if value, err := c.decoder.Deserialize(k, ev.Kv.Value); err == nil {
-						c.cache.Set(k, value)
+	var (
+		watchChan = c.Watch(context.TODO(), key, opts...)
+		done      = make(chan struct{}, 1)
+	)
+
+	c.mutex.Lock()
+	c.cacheChan[key] = done
+	c.mutex.Unlock()
+
+	for {
+		select {
+		case <-done:
+			base.Red("done")
+			return
+		case watchResponse, ok := <-watchChan:
+			if len(watchResponse.Events) > 0 {
+				for _, ev := range watchResponse.Events {
+					switch ev.Type {
+					case mvccpb.PUT:
+						k := string(ev.Kv.Key)
+						if value, err := c.decoder.Deserialize(k, ev.Kv.Value); err == nil {
+							c.cache.Set(k, value)
+						}
+					case mvccpb.DELETE:
+						c.cache.Delete(ev.Kv)
 					}
-				case mvccpb.DELETE:
-					c.cache.Delete(ev.Kv)
 				}
 			}
+
+			if !ok {
+				base.Red("chan close")
+				return
+			}
 		}
-	}()
+	}
 }
 
 func (c *config) Get(key string) (value interface{}, exists bool) {
@@ -171,5 +195,17 @@ func (c *config) Connection() (client *clientv3.Client) {
 }
 
 func (c *config) Close() (err error) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if c.hasClose {
+		return
+	}
+
+	for _, ch := range c.cacheChan {
+		ch <- base.SetValue
+	}
+
+	c.hasClose = true
 	return c.client.Close()
 }

@@ -80,13 +80,17 @@ func NewConfigWithClient(client *clientv3.Client, prefixList []string, keyOption
 	return c, err
 }
 
+// EventHandler 事件处理
+type EventHandler func(et mvccpb.Event_EventType, key string, value interface{})
+
 type config struct {
-	client    *clientv3.Client
-	cache     base.ShardMap
-	decoder   Deserializer
-	mutex     sync.RWMutex
-	hasClose  bool
-	cacheChan map[string]chan struct{}
+	client      *clientv3.Client
+	cache       base.ShardMap
+	decoder     Deserializer
+	mutex       sync.RWMutex
+	hasClose    bool
+	cacheChan   map[string]chan struct{}
+	changeEvent EventHandler
 }
 
 func (c *config) LoadKey(prefix string, opts ...clientv3.OpOption) (err error) {
@@ -125,25 +129,23 @@ func (c *config) WatchKey4Cache(key string, opts ...clientv3.OpOption) {
 	for {
 		select {
 		case <-done:
-			base.Red("done")
 			return
 		case watchResponse, ok := <-watchChan:
 			if len(watchResponse.Events) > 0 {
 				for _, ev := range watchResponse.Events {
 					switch ev.Type {
 					case mvccpb.PUT:
-						k := string(ev.Kv.Key)
+						k := base.Bytes2String(ev.Kv.Key)
 						if value, err := c.decoder.Deserialize(k, ev.Kv.Value); err == nil {
 							c.cache.Set(k, value)
 						}
 					case mvccpb.DELETE:
-						c.cache.Delete(ev.Kv)
+						c.cache.Delete(base.Bytes2String(ev.Kv.Key))
 					}
 				}
 			}
 
 			if !ok {
-				base.Red("chan close")
 				return
 			}
 		}

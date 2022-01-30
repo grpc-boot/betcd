@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/grpc-boot/base"
+	"github.com/grpc-boot/base/core/shardmap"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/v3"
 )
@@ -36,61 +37,70 @@ type Config interface {
 	Close() (err error)
 }
 
-func NewConfig(v3Conf *clientv3.Config, prefixList []string, keyOptions []KeyOption, watchOptions ...clientv3.OpOption) (c Config, err error) {
+func NewConfig(v3Conf *clientv3.Config, confOption ConfigOption, watchOptions ...clientv3.OpOption) (c Config, changeChan <-chan shardmap.ChangeEvent, err error) {
 	var client *clientv3.Client
 	client, err = clientv3.New(*v3Conf)
 
 	if err != nil {
-		return nil, err
+		return
 	}
 
-	return NewConfigWithClient(client, prefixList, keyOptions, watchOptions...)
+	return NewConfigWithClient(client, confOption, watchOptions...)
 }
 
-func NewConfigWithClient(client *clientv3.Client, prefixList []string, keyOptions []KeyOption, watchOptions ...clientv3.OpOption) (c Config, err error) {
+func NewConfigWithClient(client *clientv3.Client, co ConfigOption, watchOptions ...clientv3.OpOption) (c Config, changeChan <-chan shardmap.ChangeEvent, err error) {
 	var kom map[string]KeyOption
-	if len(keyOptions) > 0 {
-		kom = make(map[string]KeyOption, len(keyOptions))
-		for _, option := range keyOptions {
+	if len(co.KeyOptionList) > 0 {
+		kom = make(map[string]KeyOption, len(co.KeyOptionList))
+		for _, option := range co.KeyOptionList {
 			kom[option.Key] = option
 		}
 	}
 
-	c = &config{
+	conf := &config{
 		client:    client,
-		cache:     base.NewShardMap(),
 		decoder:   NewDeserializer(kom),
-		cacheChan: make(map[string]chan struct{}, len(prefixList)),
+		cacheChan: make(map[string]chan struct{}, len(co.PrefixList)),
 	}
 
-	if len(prefixList) > 0 {
-		for _, prefix := range prefixList {
+	if co.ChannelSize > 0 {
+		conf.cache, changeChan = base.NewSharMapWithChannel(int(co.ChannelSize))
+	} else {
+		conf.cache = base.NewShardMap()
+	}
+
+	if len(co.PrefixList) > 0 {
+		prefixOp := clientv3.WithPrefix()
+
+		if len(watchOptions) < 1 {
+			watchOptions = []clientv3.OpOption{prefixOp}
+		} else {
+			watchOptions = append(watchOptions, prefixOp)
+		}
+
+		for _, prefix := range co.PrefixList {
 			//加载配置
-			if er := c.LoadKey(prefix, clientv3.WithPrefix()); er != nil {
+			if er := conf.LoadKey(prefix, prefixOp); er != nil {
 				//记录错误并返回，不中断加载
 				err = er
 			}
 
 			go func(p string) {
-				c.WatchKey4Cache(p, watchOptions...)
+				conf.WatchKey4Cache(p, watchOptions...)
 			}(prefix)
 		}
 	}
 
-	return c, err
+	return conf, changeChan, err
 }
 
-// EventHandler 事件处理
-type EventHandler func(et mvccpb.Event_EventType, key string, value interface{})
-
 type config struct {
-	client      *clientv3.Client
-	cache       base.ShardMap
-	decoder     Deserializer
-	mutex       sync.RWMutex
-	hasClose    bool
-	cacheChan   map[string]chan struct{}
-	changeEvent EventHandler
+	client    *clientv3.Client
+	cache     base.ShardMap
+	decoder   Deserializer
+	mutex     sync.RWMutex
+	hasClose  bool
+	cacheChan map[string]chan struct{}
 }
 
 func (c *config) LoadKey(prefix string, opts ...clientv3.OpOption) (err error) {

@@ -59,7 +59,12 @@ func init() {
 		base.RedFatal("init naming err:%s", err.Error())
 	}
 
-	conf, err = NewConfigWithClient(client, []string{"browser/conf/app", "browser/conf/web"}, keyOptions)
+	confOption := ConfigOption{
+		PrefixList:    []string{"browser/conf/app", "browser/conf/web"},
+		KeyOptionList: keyOptions,
+	}
+
+	conf, _, err = NewConfigWithClient(client, confOption)
 
 	if err != nil {
 		base.Red("init kv err:%s", err.Error())

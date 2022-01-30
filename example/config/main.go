@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/grpc-boot/base"
+	"github.com/grpc-boot/base/core/shardmap"
 	"github.com/grpc-boot/betcd"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -12,6 +13,7 @@ import (
 var (
 	etcdClient *clientv3.Client
 	config     betcd.Config
+	changeChan <-chan shardmap.ChangeEvent
 )
 
 const (
@@ -46,7 +48,7 @@ func init() {
 	var err error
 
 	etcdClient, err = clientv3.New(clientv3.Config{
-		Endpoints:            []string{"127.0.0.1:2379"},
+		Endpoints:            []string{"10.16.49.131:2379"},
 		DialTimeout:          time.Second,
 		DialKeepAliveTime:    time.Second * 100,
 		DialKeepAliveTimeout: time.Second * 10,
@@ -56,7 +58,13 @@ func init() {
 		base.RedFatal("init etcd err:%s", err.Error())
 	}
 
-	config, err = betcd.NewConfigWithClient(etcdClient, []string{"browser/conf/app"}, keyOptions, clientv3.WithPrefix())
+	confOption := betcd.ConfigOption{
+		PrefixList:    []string{"browser/conf/app"},
+		KeyOptionList: keyOptions,
+		ChannelSize:   1024, //事件channel大小，如果不需要监听缓存事件变化，大小设置为0即可
+	}
+
+	config, changeChan, err = betcd.NewConfigWithClient(etcdClient, confOption)
 	if err != nil {
 		base.RedFatal("init etcd config err:%s", err.Error())
 	}
@@ -65,6 +73,22 @@ func init() {
 func main() {
 	go logging()
 
+	go consume()
+
+	go func() {
+		for {
+			produce()
+			time.Sleep(time.Millisecond * 500)
+		}
+	}()
+
+	defer config.Close()
+
+	var done chan struct{}
+	<-done
+}
+
+func produce() {
 	_, err := config.Put(ConfVersion, "12.0.0.3", time.Second)
 	if err != nil {
 		base.Red("put %s err:%s", ConfVersion, err.Error())
@@ -108,15 +132,28 @@ func main() {
 	if err != nil {
 		base.Red("put %s err:%s", ConfMysql, err.Error())
 	}
+}
 
-	defer config.Close()
+func consume() {
+	for {
+		event, ok := <-changeChan
+		if !ok {
+			break
+		}
 
-	var done chan struct{}
-	<-done
+		switch event.Type {
+		case shardmap.Create:
+			base.Fuchsia("create key:%+v value:%+v", event.Key, event.Value)
+		case shardmap.Update:
+			base.Fuchsia("update key:%+v value:%+v", event.Key, event.Value)
+		case shardmap.Delete:
+			base.Fuchsia("delete key:%+v value:%+v", event.Key, event.Value)
+		}
+	}
 }
 
 func logging() {
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(time.Second * 5)
 	for range tick.C {
 		val, exists := config.Get(ConfVersion)
 		base.Green("%s--%+v--%t", ConfVersion, val, exists)

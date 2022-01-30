@@ -7,7 +7,7 @@ import (
 const (
 	String = "string"
 	Json   = "json"
-	Yaml   = "Yaml"
+	Yaml   = "yaml"
 )
 
 // KeyOption Key配置

@@ -48,7 +48,7 @@ func init() {
 	var err error
 
 	etcdClient, err = clientv3.New(clientv3.Config{
-		Endpoints:            []string{"10.16.49.131:2379"},
+		Endpoints:            []string{"127.0.0.1:2379"},
 		DialTimeout:          time.Second,
 		DialKeepAliveTime:    time.Second * 100,
 		DialKeepAliveTimeout: time.Second * 10,

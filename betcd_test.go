@@ -10,6 +10,7 @@ import (
 	"github.com/grpc-boot/base"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/naming/endpoints"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -46,7 +47,7 @@ type MysqlOption struct {
 func init() {
 	var err error
 	client, err = clientv3.New(clientv3.Config{
-		Endpoints:   []string{"127.0.0.1:2379"},
+		Endpoints:   []string{"10.16.49.131:2379"},
 		DialTimeout: time.Second * 3,
 	})
 
@@ -70,7 +71,7 @@ func init() {
 		base.Red("init kv err:%s", err.Error())
 	}
 
-	loging()
+	go loging()
 }
 
 func loging() {
@@ -127,7 +128,7 @@ func TestNaming_Register(t *testing.T) {
 }
 
 func TestNaming_DialGrpc(t *testing.T) {
-	conn, err := name.DialGrpc()
+	conn, err := name.DialGrpc(grpc.WithInsecure(), grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"round_robin":{}}]}`))
 	if err != nil {
 		t.Fatalf("dial grpc error:%s", err.Error())
 	}

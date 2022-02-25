@@ -2,11 +2,10 @@ package betcd
 
 import (
 	"context"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/naming/endpoints"
-	etcdresolver "go.etcd.io/etcd/client/v3/naming/resolver"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/resolver"
 )
 
 type Naming interface {
@@ -25,15 +24,14 @@ type Naming interface {
 	// ChangeEndpoint 更换
 	ChangeEndpoint(ctx context.Context, new endpoints.Endpoint) (err error)
 	// DialGrpc ---
-	DialGrpc() (*grpc.ClientConn, error)
+	DialGrpc(opts ...grpc.DialOption) (*grpc.ClientConn, error)
 }
 
 type naming struct {
-	client       *clientv3.Client
-	service      string
-	manager      endpoints.Manager
-	grpcAddr     string
-	etcdResolver resolver.Builder
+	client   *clientv3.Client
+	service  string
+	manager  endpoints.Manager
+	grpcAddr string
 }
 
 func NewNaming(v3Conf *clientv3.Config, service string) (n Naming, err error) {
@@ -52,14 +50,11 @@ func NewNamingWithClient(client *clientv3.Client, service string) (n Naming, err
 		return nil, err
 	}
 
-	rl, _ := etcdresolver.NewBuilder(client)
-
 	n = &naming{
-		client:       client,
-		service:      service,
-		manager:      manager,
-		grpcAddr:     "etcd:///" + service,
-		etcdResolver: rl,
+		client:   client,
+		service:  service,
+		manager:  manager,
+		grpcAddr: "etcd:///" + service,
 	}
 
 	return
@@ -116,6 +111,6 @@ func (n *naming) ChangeEndpoint(ctx context.Context, endpoint endpoints.Endpoint
 	})
 }
 
-func (n *naming) DialGrpc() (*grpc.ClientConn, error) {
-	return grpc.Dial(n.grpcAddr, grpc.WithResolvers(n.etcdResolver))
+func (n *naming) DialGrpc(opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	return grpc.Dial(n.grpcAddr, opts...)
 }
